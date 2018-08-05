@@ -1,19 +1,23 @@
-# Intel NUC7i[x]BN and NUC6CAY LED Control
+# DISCLAIMER
 
-This is a simple kernel module to control the power and ring LEDs on Intel NUC7i[x]BN and NUC6CAY kits.
+Use at your own risk! In the event that your computer breaks due to use of this software, the author will not be held responisble for any damages caused!
+
+# Intel NUC8i7HVK LED Control
+
+This is a simple kernel module to control the LEDs on Intel NUC8i7HVK (Hades) kits.
 
 This module is intended as a demonstration/proof-of-concept and may not be maintained further.  Perhaps
 it can act as a jumping off point for a more polished and complete implementation.  For testing and basic
-manipulation of the power LED and ring LED, it ought to work fine, but use with caution none the less. This
-has only been tested on 4.4.x kernels.
+manipulation of the LEDs, it ought to work fine, but use with caution none the less. This
+has only been tested on 4.18 RC kernels.
 
 
 ## Requirements
 
 Requirements:
 
-* Intel NUC7i[x]BN and NUC6CAY
-* BIOS AY0038 or BN0043 or later
+* Intel NUC8i7HVK
+* Latest BIOS
 * ACPI/WMI support in kernel
 * LED(s) set to `SW Control` in BIOS
 
@@ -88,45 +92,26 @@ cat /proc/acpi/nuc_led
 To change the LED state:
 
 ```
- echo '<led>,<brightness>,<blink/fade>,<color>' | sudo tee /proc/acpi/nuc_led > /dev/null
+ echo '<action>,<led id>,<indicator id>,[setting],[value]' | sudo tee /proc/acpi/nuc_led > /dev/null
 ```
 
-|LED  |Description                              |
-|-----|-----------------------------------------|
-|power|The power button LED.                    |
-|ring |The ring LED surrounding the front panel.|
+|Action              |Description                  |
+|--------------------|-----------------------------|
+|set_indicator       |Change LED indicator type.   |
+|set_indicator_value |Change LED indicator setting.|
 
-Brightness:
 
-* any integer between `0` and `100`.
+Example execution to set Front 2 LED (5) to Wifi indicator type (3):
 
-|Blink/Fade Option|Description    |
-|-----------------|---------------|
-|blink\_fast      |1Hz blink      |
-|blink\_medium    |0.5Hz blink    |
-|blink\_slow      |0.25Hz blink   |
-|fade\_fast       |1Hz blink      |
-|fade\_medium     |0.5Hz blink    |
-|fade\_slow       |0.25Hz blink   |
-|none             |solid/always on|
+    echo 'set_indicator,5,3' | sudo tee /proc/acpi/nuc_led
 
-|LED Color|power|ring|
-|---------|:---:|:--:|
-|amber    |X    |    |
-|cyan     |     |X   |
-|blue     |X    |X   |
-|green    |     |X   |
-|off      |X    |X   |
-|pink     |     |X   |
-|red      |     |X   |
-|white    |     |X   |
-|yellow   |     |X   |
-    
-Example execution to cause the ring LED blink green at a medium rate at partial intensity:
+Example execution to set the Skull LED (2), Indicator type Power state (0), setting S0 RGB color red (3) to 10:
 
-    echo 'ring,80,blink_medium,green' | sudo tee /proc/acpi/nuc_led > /dev/null
+    echo 'set_indicator_value,2,0,3,10' | sudo tee /proc/acpi/nuc_led > /dev/null
     
 Errors in passing parameters will appear as warnings in dmesg.
+**NOTE** Not all warnings are implemented and may send unsupported data, which can inactivate the LEDs (or worse!)
+
 
 You can change the owner, group and permissions of `/proc/acpi/nuc_led` by passing parameters to the nuc_led kernel module. Use:
 

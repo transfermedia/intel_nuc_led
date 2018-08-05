@@ -1,0 +1,7 @@
+#!/bin/bash
+# steady skull
+echo "set_indicator_value,2,0,1,0" | sudo tee /proc/acpi/nuc_led
+echo "set_indicator_value,2,0,2,10" | sudo tee /proc/acpi/nuc_led
+# breathing eyes
+echo "set_indicator_value,3,0,1,1" | sudo tee /proc/acpi/nuc_led
+echo "set_indicator_value,3,0,2,3" | sudo tee /proc/acpi/nuc_led

@@ -1,6 +1,9 @@
 /*
- * Intel NUC LED Control Driver
+ * Intel NUC NUC8i7HVK (Hades) LED Control WMI Driver
  *
+ * Copyright (C) 2018 Patrik Kullman
+ * 
+ * Forked from intel_nuc_led (https://github.com/milesp20/intel_nuc_led)
  * Copyright (C) 2017 Miles Peterson
  *
  * Portions based on asus-wmi.c:
@@ -10,6 +13,9 @@
  * Portions based on acpi_call.c:
  * Copyright (C) 2010: Michal Kottman
  *
+ * Based on WMI Interface for Intel® NUC Products - WMI Specification, August 2018 rev 0.64
+ * (specs/INTEL_WMI_LED_0.64.pdf)
+ * 
  * Based on Intel Article ID 000023426
  * http://www.intel.com/content/www/us/en/support/boards-and-kits/intel-nuc-kits/000023426.html
  *
@@ -38,458 +44,502 @@
 #include <linux/vmalloc.h>
 #include <linux/uaccess.h>
 
-MODULE_AUTHOR("Miles Peterson");
-MODULE_DESCRIPTION("Intel NUC LED Control WMI Driver");
+MODULE_AUTHOR("Patrik Kullman");
+MODULE_DESCRIPTION("Intel NUC NUC8i7HVK (Hades) LED Control WMI Driver");
 MODULE_LICENSE("GPL");
 ACPI_MODULE_NAME("NUC_LED");
 
-static unsigned int nuc_led_perms __read_mostly = S_IRUGO | S_IWUSR | S_IWGRP;
-static unsigned int nuc_led_uid __read_mostly;
-static unsigned int nuc_led_gid __read_mostly;
+#include "nuc_led.h"
 
-module_param(nuc_led_perms, uint, S_IRUGO | S_IWUSR | S_IWGRP);
-module_param(nuc_led_uid, uint, 0);
-module_param(nuc_led_gid, uint, 0);
+LED_INFO *leds;
 
-MODULE_PARM_DESC(nuc_led_perms, "permissions on /proc/acpi/nuc_led");
-MODULE_PARM_DESC(nuc_led_uid, "default owner of /proc/acpi/nuc_led");
-MODULE_PARM_DESC(nuc_led_gid, "default owning group of /proc/acpi/nuc_led");
+static int nuc_led_get_indicator_items(u8 led_id, u8 indicator_id, u8 items,
+				       u8 *indicator) {
+	struct acpi_args args = {
+		.arg1 = NUCLED_WMI_METHODARG_GETINDICATOROPTIONVALUE,
+		.arg2 = led_id,
+		.arg3 = indicator_id,
+		.arg4 = 0
+	};
+	struct acpi_buffer input;
+	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *obj;
+	acpi_status status;
+	u8 i;
 
-/* Intel NUC WMI GUID */
-#define NUCLED_WMI_MGMT_GUID            "8C5DA44C-CDC3-46b3-8619-4E26D34390B7"
-MODULE_ALIAS("wmi:" NUCLED_WMI_MGMT_GUID);
+	input.length = (acpi_size)sizeof(args);
+	input.pointer = &args;
 
-/* LED Control Method ID */
-#define NUCLED_WMI_METHODID_GETSTATE    0x01
-#define NUCLED_WMI_METHODID_SETSTATE    0x02
+	for (i = 0; i < items; i++) {
+		args.arg4 = i;
+		status =
+			wmi_evaluate_method(NUCLED_WMI_MGMT_GUID, 0,
+					    NUCLED_WMI_METHODID_NEWGETLEDSTATUS,
+					    &input, &output);
 
-/* LED Identifiers */
-#define NUCLED_WMI_POWER_LED_ID         0x01
-#define NUCLED_WMI_RING_LED_ID          0x02
+		if (ACPI_FAILURE(status)) {
+			ACPI_EXCEPTION(
+				(AE_INFO, status, "wmi_evaluate_method"));
+			return -EIO;
+		}
 
-/* Return codes */
-#define NUCLED_WMI_RETURN_SUCCESS       0x00
-#define NUCLED_WMI_RETURN_NOSUPPORT     0xE1
-#define NUCLED_WMI_RETURN_UNDEFINED     0xE2
-#define NUCLED_WMI_RETURN_NORESPONSE    0xE3
-#define NUCLED_WMI_RETURN_BADPARAM      0xE4
-#define NUCLED_WMI_RETURN_UNEXPECTED    0xEF
-
-/* Blink and fade */
-#define NUCLED_WMI_BLINK_1HZ            0x01
-#define NUCLED_WMI_BLINK_0_25HZ         0x02
-#define NUCLED_WMI_FADE_1HZ             0x03
-#define NUCLED_WMI_ALWAYS_ON            0x04
-#define NUCLED_WMI_BLINK_0_5HZ          0x05
-#define NUCLED_WMI_FADE_0_25HZ          0x06
-#define NUCLED_WMI_FADE_0_5HZ           0x07
-
-/* Power button colors */
-#define NUCLED_WMI_POWER_COLOR_DISABLE  0x00
-#define NUCLED_WMI_POWER_COLOR_BLUE     0x01
-#define NUCLED_WMI_POWER_COLOR_AMBER    0x02
-
-/* Ring colors */
-#define NUCLED_WMI_RING_COLOR_DISABLE   0x00
-#define NUCLED_WMI_RING_COLOR_CYAN      0x01
-#define NUCLED_WMI_RING_COLOR_PINK      0x02
-#define NUCLED_WMI_RING_COLOR_YELLOW    0x03
-#define NUCLED_WMI_RING_COLOR_BLUE      0x04
-#define NUCLED_WMI_RING_COLOR_RED       0x05
-#define NUCLED_WMI_RING_COLOR_GREEN     0x06
-#define NUCLED_WMI_RING_COLOR_WHITE     0x07
-
-extern struct proc_dir_entry *acpi_root_dir;
-
-struct led_get_state_args {
-        u32 led;
-} __packed;
-
-struct led_get_state_return {
-        u32 return_code;
-        u32 brightness;
-        u32 blink_fade;
-        u32 color_state;
-} __packed;
-
-struct led_set_state_args {
-        u8 led;
-        u8 brightness;
-        u8 blink_fade;
-        u8 color_state;
-}__packed;
-
-struct led_set_state_return {
-        u32 brightness_return;
-        u32 blink_fade_return;
-        u32 color_return;
-} __packed;
-
-#define BUFFER_SIZE 512
-static char result_buffer[BUFFER_SIZE];
-static char *get_buffer_end(void) {
-    return result_buffer + strlen(result_buffer);
-}
-
-/* Convert blink/fade value to text */
-static const char* const blink_fade_text[] = { "Off", "1Hz Blink", "0.25Hz Blink", "1Hz Fade", "Always On", "0.5Hz Blink", "0.25Hz Fade", "0.5Hz Fade" };
-
-/* Convert color value to text */
-static const char* const pwrcolor_text[] =   { "Off", "Blue", "Amber" };
-static const char* const ringcolor_text[] =  { "Off", "Cyan", "Pink", "Yellow", "Blue", "Red", "Green", "White" };
-
-/* Get LED state */
-static int nuc_led_get_state(u32 led, struct led_get_state_return *state)
-{
-        struct led_get_state_args args = {
-                .led = led
-        };
-        struct acpi_buffer input;
-        struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
-        acpi_status status;
-        union acpi_object *obj;
-
-        input.length = (acpi_size) sizeof(args);
-        input.pointer = &args;
-
-	// Per Intel docs, first instance is used (instance is indexed from 0)
-        status = wmi_evaluate_method(NUCLED_WMI_MGMT_GUID, 0, NUCLED_WMI_METHODID_GETSTATE,
-                                     &input, &output);
-
-        if (ACPI_FAILURE(status))
-	{
-		ACPI_EXCEPTION((AE_INFO, status, "wmi_evaluate_method"));
-                return -EIO;
+		// Always returns a buffer
+		obj = (union acpi_object *)output.pointer;
+		indicator[i] = obj->buffer.pointer[1];
+		// pr_info("LED %i, ind id %d, item %d, val %d", led_id, indicator_id, i, obj->buffer.pointer[1]);
 	}
 
-        // Always returns a buffer
-        obj = (union acpi_object *)output.pointer;
-        if (obj && state)
-        {
-                state->return_code = obj->buffer.pointer[0];
-                state->brightness  = obj->buffer.pointer[1];
-                state->blink_fade  = obj->buffer.pointer[2];
-                state->color_state = obj->buffer.pointer[3];
-        }
+	kfree(obj);
 
-        kfree(obj);
-
-        return 0;
+	return 0;
 }
 
-/* Set LED state */
-static int nuc_led_set_state(u32 led, u32 brightness, u32 blink_fade, u32 color_state,
-                struct led_set_state_return *retval)
-{
-        struct led_set_state_args args = {
-                .led = led,
-                .brightness = brightness,
-                .blink_fade = blink_fade,
-                .color_state = color_state
-        };
+static int nuc_led_fill_indicator_values(LED_INFO *led) {
+	int ssize;
+	if (led->indicator_option == NUCLED_USAGE_TYPE_POWER_STATE) {
+		ssize = sizeof(struct power_state_indicator);
+		led->indicator = vmalloc(ssize);
+		return nuc_led_get_indicator_items(led->led_type,
+						   led->indicator_option, ssize,
+						   led->indicator);
+	}
+	return 0;
+}
 
-        struct acpi_buffer input;
-        struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
-        acpi_status status;
-        union acpi_object *obj;
+/* Get LED */
+static int nuc_led_get_led(u8 led_id, LED_INFO *led) {
+	struct acpi_args args = {
+		.arg1 = NUCLED_WMI_METHODARG_QUERYLEDCOLORTYPE, .arg2 = led_id
+	};
+	struct acpi_buffer input;
+	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *obj;
+	acpi_status status;
 
-        input.length = (acpi_size) sizeof(args);
-        input.pointer = &args;
-        
+	input.length = (acpi_size)sizeof(args);
+	input.pointer = &args;
+
 	// Per Intel docs, first instance is used (instance is indexed from 0)
-        status = wmi_evaluate_method(NUCLED_WMI_MGMT_GUID, 0, NUCLED_WMI_METHODID_SETSTATE,
-                                     &input, &output);
+	status = wmi_evaluate_method(NUCLED_WMI_MGMT_GUID, 0,
+				     NUCLED_WMI_METHODID_QUERYLED, &input,
+				     &output);
 
-        if (ACPI_FAILURE(status))
-	{
+	if (ACPI_FAILURE(status)) {
 		ACPI_EXCEPTION((AE_INFO, status, "wmi_evaluate_method"));
-                return -EIO;
+		return -EIO;
 	}
 
-        // Always returns a buffer
-        obj = (union acpi_object *)output.pointer;
-        if (obj && retval)
-        {
-                retval->brightness_return = obj->buffer.pointer[0];
-                retval->blink_fade_return = obj->buffer.pointer[1];
-                retval->color_return      = obj->buffer.pointer[2];
-        }
+	// Always returns a buffer
+	obj = (union acpi_object *)output.pointer;
 
-        kfree(obj);
+	led->led_type = led_id;
+	led->name = led_names[led_id];
+	led->led_color_type.flags = obj->buffer.pointer[1];
 
-        return 0;
+	// pr_info("LED %i (%s) - Color type blue_amber %i, blue_white %i, rgb %i", led_id, led->name, led->led_color_type.blue_amber, led->led_color_type.blue_white, led->led_color_type.rgb);
+
+	args.arg1 = NUCLED_WMI_METHODARG_QUERYINDICATORSUPPORT;
+
+	// Per Intel docs, first instance is used (instance is indexed from 0)
+	status = wmi_evaluate_method(NUCLED_WMI_MGMT_GUID, 0,
+				     NUCLED_WMI_METHODID_QUERYLED, &input,
+				     &output);
+
+	if (ACPI_FAILURE(status)) {
+		ACPI_EXCEPTION((AE_INFO, status, "wmi_evaluate_method"));
+		return -EIO;
+	}
+
+	obj = (union acpi_object *)output.pointer;
+	led->usage_type = obj->buffer.pointer[1];
+
+	// pr_info("LED %i - Got power_state %i, hdd_activity %i, ethernet %i, wifi %i, software %i, power_limit %i, disable %i", led_id, led->usage_type.power_state, led->usage_type.hdd_activity, led->usage_type.ethernet, led->usage_type.wifi, led->usage_type.software, led->usage_type.power_limit, led->usage_type.disable);
+
+	args.arg1 = NUCLED_WMI_METHODARG_GETCURRENTINDICATOR;
+
+	// Per Intel docs, first instance is used (instance is indexed from 0)
+	status = wmi_evaluate_method(NUCLED_WMI_MGMT_GUID, 0,
+				     NUCLED_WMI_METHODID_NEWGETLEDSTATUS,
+				     &input, &output);
+
+	if (ACPI_FAILURE(status)) {
+		ACPI_EXCEPTION((AE_INFO, status, "wmi_evaluate_method"));
+		return -EIO;
+	}
+
+	obj = (union acpi_object *)output.pointer;
+	led->indicator_option = obj->buffer.pointer[1];
+
+	// pr_info("LED %i - Got indicator option %i", led_id, obj->buffer.pointer[1]);
+
+	kfree(obj);
+
+	nuc_led_fill_indicator_values(led);
+
+	return 0;
+}
+
+/* Get LEDs */
+static int nuc_led_get_leds(void) {
+	struct acpi_args args = { .arg1 = 0 };
+	struct acpi_buffer input;
+	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *obj;
+	acpi_status status;
+
+	LED_TYPES led_types;
+	int flags, i, o = 0, num_leds;
+
+	input.length = (acpi_size)sizeof(args);
+	input.pointer = &args;
+
+	// Per Intel docs, first instance is used (instance is indexed from 0)
+	status = wmi_evaluate_method(NUCLED_WMI_MGMT_GUID, 0,
+				     NUCLED_WMI_METHODID_QUERYLED, &input,
+				     &output);
+
+	if (ACPI_FAILURE(status)) {
+		ACPI_EXCEPTION((AE_INFO, status, "wmi_evaluate_method"));
+		return -EIO;
+	}
+
+	// Always returns a buffer
+	obj = (union acpi_object *)output.pointer;
+	flags = led_types.flags = obj->buffer.pointer[1];
+
+	// pr_info("Got pwr %i, hdd %i, skull %i, eyes %i, front1 %i, front2 %i, front3 %i", led_types.power, led_types.hdd, led_types.skull, led_types.eyes, led_types.front1, led_types.front2, led_types.front3);
+
+	num_leds = countSetBits(led_types.flags);
+	// pr_info("Num leds: %i", num_leds);
+	leds = vmalloc(sizeof(LED_INFO) * num_leds);
+
+	for (i = 0; i < 8; i++) {
+		if (flags & 0x01) {
+			nuc_led_get_led(i, &leds[o++]);
+		}
+		flags = flags >> 1;
+	}
+
+	kfree(obj);
+
+	return num_leds;
+}
+
+static int nuc_led_set_indicator(u8 led_id, u8 indicator_id) {
+	struct acpi_args args = { .arg1 = led_id, .arg2 = indicator_id };
+	struct acpi_buffer input;
+	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
+	acpi_status status;
+
+	input.length = (acpi_size)sizeof(args);
+	input.pointer = &args;
+
+	status = wmi_evaluate_method(
+		NUCLED_WMI_MGMT_GUID, 0,
+		NUCLED_WMI_METHODID_SETINDICATOROPTIONLEDTYPE, &input, &output);
+
+	if (ACPI_FAILURE(status)) {
+		ACPI_EXCEPTION((AE_INFO, status, "wmi_evaluate_method"));
+		return -EIO;
+	}
+	return 0;
+}
+
+static int nuc_led_set_indicator_option(u8 led_id, u8 indicator_id, u8 item_id,
+					u8 value) {
+	struct acpi_args args = { .arg1 = led_id,
+				  .arg2 = indicator_id,
+				  .arg3 = item_id,
+				  .arg4 = value };
+	struct acpi_buffer input;
+	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
+	acpi_status status;
+
+	input.length = (acpi_size)sizeof(args);
+	input.pointer = &args;
+
+	// Per Intel docs, first instance is used (instance is indexed from 0)
+	status = wmi_evaluate_method(
+		NUCLED_WMI_MGMT_GUID, 0,
+		NUCLED_WMI_METHODID_SETVALUEINDICATOROPTIONLEDTYPE, &input,
+		&output);
+
+	if (ACPI_FAILURE(status)) {
+		ACPI_EXCEPTION((AE_INFO, status, "wmi_evaluate_method"));
+		return -EIO;
+	}
+	return 0;
 }
 
 static ssize_t acpi_proc_write(struct file *filp, const char __user *buff,
-                size_t len, loff_t *data)
-{
-        int i = 0;
-        int ret = 0;
-        char *input, *arg, *sep;
-        static int status  = 0;
-        struct led_set_state_return retval;
-        u32 led, brightness, blink_fade, color_state;
+			       size_t len, loff_t *data) {
+	int i = 0;
+	int ret = 0;
+	char *input, *arg, *sep;
+	static int status = 0;
+	u8 action, led_id, indicator_id, indicator_setting, setting_value;
 
-        // Move buffer from user space to kernel space
-        input = vmalloc(len);
-        if (!input)
-                return -ENOMEM;
+	// Move buffer from user space to kernel space
+	input = vmalloc(len);
+	if (!input)
+		return -ENOMEM;
 
-        if (copy_from_user(input, buff, len))
-                return -EFAULT;
+	if (copy_from_user(input, buff, len))
+		return -EFAULT;
 
-        // Strip new line
-        input[len] = '\0';
-        if (input[len - 1] == '\n')
-                input[len - 1] = '\0';
+	// Strip new line
+	input[len] = '\0';
+	if (input[len - 1] == '\n')
+		input[len - 1] = '\0';
 
-        // Parse input string
+	// Parse input string
 	sep = input;
-        while ((arg = strsep(&sep, ",")) && *arg)
-        {
-                if (i == 0)             // First arg: LED ("power" or "ring")
-                {
-                        if (!strcmp(arg, "power"))
-                                led = NUCLED_WMI_POWER_LED_ID;
-                        else if (!strcmp(arg, "ring"))
-                                led = NUCLED_WMI_RING_LED_ID;
-                        else
-                                ret = -EINVAL;
-                }
-                else if (i == 1)        // Second arg: brightness (0 - 100)
-                {
-                        long val;
+	while ((arg = strsep(&sep, ",")) && *arg) {
+		switch (i) {
+		case 0: // First arg: operation ("set_indicator" or "set_indicator_value")
+			if (!strcmp(arg, "set_indicator")) {
+				action = NUCLED_PROC_SET_INDICATOR;
+			} else if (!strcmp(arg, "set_indicator_value")) {
+				action = NUCLED_PROC_SETINDICATOROPTIONVALUE;
+			} else {
+				pr_warn("Invalid action (%s) while setting NUC LED state\n",
+					arg);
+				ret = -EINVAL;
+			}
+			break;
 
-                        if (kstrtol(arg, 0, &val))
-                        {
-                                ret = -EINVAL;
-                        }
-                        else
-                        {
-                                if (val < 0 || val > 100)
-                                        ret = -EINVAL;
-                                else
-                                        brightness = val;
-                        }
-                }
-                else if (i == 2)        // Third arg: fade/brightness (text values)
-                {
-                        if (!strcmp(arg, "none"))
-                                blink_fade = NUCLED_WMI_ALWAYS_ON;
-                        else if (!strcmp(arg, "blink_fast"))
-                                blink_fade = NUCLED_WMI_BLINK_1HZ;
-                        else if (!strcmp(arg, "blink_medium"))
-                                blink_fade = NUCLED_WMI_BLINK_0_5HZ;
-                        else if (!strcmp(arg, "blink_slow"))
-                                blink_fade = NUCLED_WMI_BLINK_0_25HZ;
-                        else if (!strcmp(arg, "fade_fast"))
-                                blink_fade = NUCLED_WMI_FADE_1HZ;
-                        else if (!strcmp(arg, "fade_medium"))
-                                blink_fade = NUCLED_WMI_FADE_0_5HZ;
-                        else if (!strcmp(arg, "fade_slow"))
-                                blink_fade = NUCLED_WMI_FADE_0_25HZ;
-                        else
-                                ret = -EINVAL;
-                }
-                else if (i == 3)        // Fourth arg: color (text values)
-                {
-                        if (led == NUCLED_WMI_POWER_LED_ID)
-                        {
-                                if (!strcmp(arg, "off"))
-                                        color_state = NUCLED_WMI_POWER_COLOR_DISABLE;
-                                else if (!strcmp(arg, "blue"))
-                                        color_state = NUCLED_WMI_POWER_COLOR_BLUE;
-                                else if (!strcmp(arg, "amber"))
-                                        color_state = NUCLED_WMI_POWER_COLOR_AMBER;
-                                else
-                                        ret = -EINVAL;
-                        }
-                        else if (led == NUCLED_WMI_RING_LED_ID)
-                        {
-                                if (!strcmp(arg, "off"))
-                                        color_state = NUCLED_WMI_RING_COLOR_DISABLE;
-                                else if (!strcmp(arg, "cyan"))
-                                        color_state = NUCLED_WMI_RING_COLOR_CYAN;
-                                else if (!strcmp(arg, "pink"))
-                                        color_state = NUCLED_WMI_RING_COLOR_PINK;
-                                else if (!strcmp(arg, "yellow"))
-                                        color_state = NUCLED_WMI_RING_COLOR_YELLOW;
-                                else if (!strcmp(arg, "blue"))
-                                        color_state = NUCLED_WMI_RING_COLOR_BLUE;
-                                else if (!strcmp(arg, "red"))
-                                        color_state = NUCLED_WMI_RING_COLOR_RED;
-                                else if (!strcmp(arg, "green"))
-                                        color_state = NUCLED_WMI_RING_COLOR_GREEN;
-                                else if (!strcmp(arg, "white"))
-                                        color_state = NUCLED_WMI_RING_COLOR_WHITE;
-                                else
-                                        ret = -EINVAL;
-                        }
-                }
-                else                    // Too many args!
-                        ret = -EOVERFLOW;
+		case 1: // Second arg: LED ID
+			if (kstrtou8(arg, 0, &led_id)) {
+				pr_warn("Invalid LED ID (%s) while setting NUC LED state\n",
+					arg);
+				ret = -EINVAL;
+			}
+			break;
 
-                // Track iterations
-                i++;
-        }
+		case 2: // Third arg: indicator id
+			if (kstrtou8(arg, 0, &indicator_id)) {
+				pr_warn("Invalid indicator ID (%s) while setting NUC LED state\n",
+					arg);
+				ret = -EINVAL;
+			}
+			break;
 
-        vfree(input);
+		case 3: // Fourth arg (for set_indicator_value): indicator setting
+			if (action == NUCLED_PROC_SET_INDICATOR) {
+				pr_warn("Too many arguments for action set_indicator while setting NUC LED state\n");
+				ret = -EOVERFLOW;
+				break;
+			}
+			if (kstrtou8(arg, 0, &indicator_setting)) {
+				pr_warn("Invalid indicator setting (%s) while setting NUC LED state\n",
+					arg);
+				ret = -EINVAL;
+			}
+			break;
 
-        if (ret == -EOVERFLOW)
-        {
-                pr_warn("Too many arguments while setting NUC LED state\n");
-        }
-        else if (i != 4)
-        {
-                pr_warn("Too few arguments while setting NUC LED state\n");
-        }
-        else if (ret == -EINVAL)
-        {
-                pr_warn("Invalid argument while setting NUC LED state\n");
-        }
-        else
-        {
-                status = nuc_led_set_state(led, brightness, blink_fade, color_state, &retval);
-                if (status)
-                {
-                        pr_warn("Unable to set NUC LED state: WMI call failed\n");
-                }
-                else
-                {
-                        if (retval.brightness_return == NUCLED_WMI_RETURN_UNDEFINED)
-                        {
-                                if (led == NUCLED_WMI_POWER_LED_ID)
-                                        pr_warn("Unable set NUC power LED state: not set for SW control\n");
-                                else if (led == NUCLED_WMI_RING_LED_ID)
-                                        pr_warn("Unable set NUC ring LED state: not set for SW control\n");
-                        }
-                        else if (retval.brightness_return == NUCLED_WMI_RETURN_BADPARAM || retval.blink_fade_return == NUCLED_WMI_RETURN_BADPARAM ||
-                                 retval.color_return == NUCLED_WMI_RETURN_BADPARAM)
-                        {
-                                pr_warn("Unable to set NUC LED state: invalid parameter\n");
-                        }
-                        else if (retval.brightness_return != NUCLED_WMI_RETURN_SUCCESS)
-                        {
-                                pr_warn("Unable to set NUC LED state: WMI call returned error\n");
-                        }
-                }
-        }
+		case 4: // Fifth arg (for set_indicator_value): indicator setting value
+			if (action == NUCLED_PROC_SET_INDICATOR) {
+				pr_warn("Too many arguments for action set_indicator while setting NUC LED state\n");
+				ret = -EOVERFLOW;
+				break;
+			}
+			if (kstrtou8(arg, 0, &setting_value)) {
+				pr_warn("Invalid indicator setting (%s) while setting NUC LED state\n",
+					arg);
+				ret = -EINVAL;
+			}
+			break;
 
-        return len;
+		default: // Too many args!
+			pr_warn("Too many arguments while setting NUC LED state\n");
+			ret = -EOVERFLOW;
+			break;
+		}
+
+		if (ret != 0) {
+			break;
+		}
+
+		// Track iterations
+		i++;
+	}
+
+	vfree(input);
+
+	if (ret == 0) {
+		if (i != 3 && action == NUCLED_PROC_SET_INDICATOR) {
+			pr_warn("Too few arguments (%d), needs 3, while setting NUC LED indicator\n",
+				i);
+			ret = -EINVAL;
+		}
+
+		if (i != 5 && action == NUCLED_PROC_SETINDICATOROPTIONVALUE) {
+			pr_warn("Too few arguments (%d), needs 5, while setting NUC LED indicator\n",
+				i);
+			ret = -EINVAL;
+		}
+	}
+
+	if (ret != 0) {
+		return len;
+	}
+
+	switch (action) {
+	case NUCLED_PROC_SET_INDICATOR:
+		pr_info("Setting LED %i indicator to %i\n", led_id,
+			indicator_id);
+		nuc_led_set_indicator(led_id, indicator_id);
+		break;
+	case NUCLED_PROC_SETINDICATOROPTIONVALUE:
+		pr_info("Setting LED %i indicator %i option %i to %i\n", led_id,
+			indicator_id, indicator_setting, setting_value);
+		nuc_led_set_indicator_option(led_id, indicator_id,
+					     indicator_setting, setting_value);
+		break;
+	}
+
+	/*
+	status = nuc_led_set_state(led, brightness, blink_fade, color_state, &retval);
+	if (status)
+	{
+		pr_warn("Unable to set NUC LED state: WMI call failed\n");
+	}
+	else
+	{
+		if (retval.brightness_return == NUCLED_WMI_RETURN_UNDEFINED)
+		{
+			if (led == NUCLED_WMI_POWER_LED_ID)
+				pr_warn("Unable set NUC power LED state: not set for SW control\n");
+			else if (led == NUCLED_WMI_RING_LED_ID)
+				pr_warn("Unable set NUC ring LED state: not set for SW control\n");
+		}
+		else if (retval.brightness_return == NUCLED_WMI_RETURN_BADPARAM || retval.blink_fade_return == NUCLED_WMI_RETURN_BADPARAM ||
+				retval.color_return == NUCLED_WMI_RETURN_BADPARAM)
+		{
+			pr_warn("Unable to set NUC LED state: invalid parameter\n");
+		}
+		else if (retval.brightness_return != NUCLED_WMI_RETURN_SUCCESS)
+		{
+			pr_warn("Unable to set NUC LED state: WMI call returned error (0x%02x)\n", retval.brightness_return);
+		}
+	}*/
+
+	return len;
+}
+
+static void print_color(LED_RGB *rgb) {
+	sprintf(get_buffer_end(), "rgb(%d,%d,%d)", rgb->red, rgb->green,
+		rgb->blue);
+}
+
+static void print_blink_led(BLINK_LED *led) {
+	sprintf(get_buffer_end(), "%d%% %s ", led->brightness,
+		led_blink_behaviors[led->blink_behavior]);
+	print_color(&led->color);
+	sprintf(get_buffer_end(), " (%d dHz)", led->blink_freq);
+}
+
+static void print_led(LED_INFO *led) {
+	int i;
+	sprintf(get_buffer_end(), "LED %i (%s) - Color type: %s\n",
+		led->led_type, led->name,
+		led_color_types[bitIndexToIndex(led->led_color_type.flags)]);
+
+	sprintf(get_buffer_end(), "  Supported indicators: ");
+	for (i = 1; i <= 128; i = i << 1) {
+		if (led->usage_type & i) {
+			sprintf(get_buffer_end(), "%s  ",
+				led_usage_types[bitIndexToIndex(i)]);
+		}
+	}
+
+	sprintf(get_buffer_end(), "\n  Current indicator: %s\n",
+		led_usage_types[led->indicator_option]);
+
+	if (led->indicator_option == NUCLED_USAGE_TYPE_POWER_STATE) {
+		struct power_state_indicator *in2 =
+			(struct power_state_indicator *)led->indicator;
+		sprintf(get_buffer_end(), "\n        S0 (On): ");
+		print_blink_led(&in2->s0);
+		sprintf(get_buffer_end(), "\n     S3 (Sleep): ");
+		print_blink_led(&in2->s3);
+		sprintf(get_buffer_end(), "\n     Ready mode: ");
+		print_blink_led(&in2->ready_mode);
+		sprintf(get_buffer_end(), "\n  S5 (Soft off): ");
+		print_blink_led(&in2->s5);
+		sprintf(get_buffer_end(), "\n");
+	}
+
+	sprintf(get_buffer_end(), "\n");
 }
 
 static ssize_t acpi_proc_read(struct file *filp, char __user *buff,
-                size_t count, loff_t *off)
-{
-        ssize_t ret;
-        static int status_pwr  = 0;
-        static int status_ring = 0;
-        struct led_get_state_return power_led;
-        struct led_get_state_return ring_led;
-        int len = 0;
+			      size_t count, loff_t *off) {
+	ssize_t ret;
 
-        // Get statuses from WMI interface
-        status_pwr = nuc_led_get_state(NUCLED_WMI_POWER_LED_ID, &power_led);
-        if (status_pwr)
-                pr_warn("Unable to get NUC power LED state\n");
+	int i, len = 0;
+	// Clear buffer
+	memset(result_buffer, 0, BUFFER_SIZE);
 
-        status_ring = nuc_led_get_state(NUCLED_WMI_RING_LED_ID, &ring_led);
-        if (status_ring)
-                pr_warn("Unable to get NUC ring LED state\n");
+	int num_leds = nuc_led_get_leds();
 
-        // Clear buffer
-        memset(result_buffer, 0, BUFFER_SIZE);
+	for (i = 0; i < num_leds; i++) {
+		print_led(&leds[i]);
+	}
 
-        // Process state for power LED
-        if (status_pwr)
-        {
-                sprintf(get_buffer_end(), "Power LED state could not be determined: WMI call failed\n\n");
-        }
-        else
-        {
-                if (power_led.return_code == NUCLED_WMI_RETURN_SUCCESS)
-                        sprintf(get_buffer_end(), "Power LED Brightness: %d%%\nPower LED Blink/Fade: %s (0x%02x)\nPower LED Color: %s (0x%02x)\n\n",
-                                power_led.brightness,
-                                blink_fade_text[power_led.blink_fade], power_led.blink_fade,
-                                pwrcolor_text[power_led.color_state], power_led.color_state);
-                else if (power_led.return_code == NUCLED_WMI_RETURN_UNDEFINED)
-                        sprintf(get_buffer_end(), "Power LED not set for software control\n\n");
-                else
-                        sprintf(get_buffer_end(), "Power LED state could not be determined: WMI call returned error\n\n");
-        }
+	// Return buffer via proc
+	len = strlen(result_buffer);
+	ret = simple_read_from_buffer(buff, count, off, result_buffer, len + 1);
 
-        // Process state for ring LED
-        if (status_ring)
-        {
-                sprintf(get_buffer_end(), "Ring LED state could not be determined: WMI call failed\n\n");
-        }
-        else
-        {
-                if (ring_led.return_code == NUCLED_WMI_RETURN_SUCCESS)
-                        sprintf(get_buffer_end(), "Ring LED Brightness: %d%%\nRing LED Blink/Fade: %s (0x%02x)\nRing LED Color: %s (0x%02x)\n\n",
-                                ring_led.brightness,
-                                blink_fade_text[ring_led.blink_fade], ring_led.blink_fade,
-                                ringcolor_text[ring_led.color_state], ring_led.color_state);
-                else if (power_led.return_code == NUCLED_WMI_RETURN_UNDEFINED)
-                        sprintf(get_buffer_end(), "Ring LED not set for software control\n\n");
-                else
-                        sprintf(get_buffer_end(), "Ring LED state could not be determined: WMI call returned error\n\n");
-        }
-
-        // Return buffer via proc
-        len = strlen(result_buffer);
-        ret = simple_read_from_buffer(buff, count, off, result_buffer, len + 1);
-
-        return ret;
+	return ret;
 }
 
 static struct file_operations proc_acpi_operations = {
-        .owner    = THIS_MODULE,
-        .read     = acpi_proc_read,
-        .write    = acpi_proc_write,
+	.owner = THIS_MODULE,
+	.read = acpi_proc_read,
+	.write = acpi_proc_write,
 };
 
 /* Init & unload */
-static int __init init_nuc_led(void)
-{
-        struct proc_dir_entry *acpi_entry;
+static int __init init_nuc_led(void) {
+	struct proc_dir_entry *acpi_entry;
 	kuid_t uid;
 	kgid_t gid;
 
-        // Make sure LED control WMI GUID exists
-        if (!wmi_has_guid(NUCLED_WMI_MGMT_GUID)) {
-                pr_warn("Intel NUC LED WMI GUID not found\n");
-                return -ENODEV;
-        }
+	// Make sure LED control WMI GUID exists
+	if (!wmi_has_guid(NUCLED_WMI_MGMT_GUID)) {
+		pr_warn("Intel NUC LED WMI GUID not found\n");
+		return -ENODEV;
+	}
 
-        // Verify the user parameters
+	// Verify the user parameters
 	uid = make_kuid(&init_user_ns, nuc_led_uid);
 	gid = make_kgid(&init_user_ns, nuc_led_gid);
 
 	if (!uid_valid(uid) || !gid_valid(gid)) {
-                pr_warn("Intel NUC LED control driver got an invalid UID or GID\n");
+		pr_warn("Intel NUC LED control driver got an invalid UID or GID\n");
 		return -EINVAL;
 	}
 
-        // Create nuc_led ACPI proc entry
-        acpi_entry = proc_create("nuc_led", nuc_led_perms, acpi_root_dir, &proc_acpi_operations);
+	// Create nuc_led ACPI proc entry
+	acpi_entry = proc_create("nuc_led", nuc_led_perms, acpi_root_dir,
+				 &proc_acpi_operations);
 
-        if (acpi_entry == NULL) {
-                pr_warn("Intel NUC LED control driver could not create proc entry\n");
-                return -ENOMEM;
-        }
+	if (acpi_entry == NULL) {
+		pr_warn("Intel NUC LED control driver could not create proc entry\n");
+		return -ENOMEM;
+	}
 
-        proc_set_user(acpi_entry, uid, gid);
+	proc_set_user(acpi_entry, uid, gid);
 
-        pr_info("Intel NUC LED control driver loaded\n");
+	pr_info("Intel NUC LED control driver loaded\n");
 
-        return 0;
+	return 0;
 }
 
-static void __exit unload_nuc_led(void)
-{
-        remove_proc_entry("nuc_led", acpi_root_dir);
-        pr_info("Intel NUC LED control driver unloaded\n");
+static void __exit unload_nuc_led(void) {
+	remove_proc_entry("nuc_led", acpi_root_dir);
+	pr_info("Intel NUC LED control driver unloaded\n");
 }
 
 module_init(init_nuc_led);

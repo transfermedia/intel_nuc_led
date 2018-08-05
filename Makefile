@@ -38,3 +38,11 @@ dkms-uninstall:
 install:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
 	@depmod -a $(KVERSION)
+
+rebuild:
+	-rmmod nuc_led
+	-dkms remove intel-nuc-led/1.0 --all
+	${MAKE} dkms-install
+	modprobe nuc_led
+	cat /proc/acpi/nuc_led
+
