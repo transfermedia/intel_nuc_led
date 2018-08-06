@@ -54,7 +54,8 @@ ACPI_MODULE_NAME("NUC_LED");
 LED_INFO *leds;
 
 static int nuc_led_get_indicator_items(u8 led_id, u8 indicator_id, u8 items,
-				       u8 *indicator) {
+				       u8 *indicator)
+{
 	struct acpi_args args = {
 		.arg1 = NUCLED_WMI_METHODARG_GETINDICATOROPTIONVALUE,
 		.arg2 = led_id,
@@ -94,20 +95,41 @@ static int nuc_led_get_indicator_items(u8 led_id, u8 indicator_id, u8 items,
 	return 0;
 }
 
-static int nuc_led_fill_indicator_values(LED_INFO *led) {
+static int nuc_led_fill_indicator_values(LED_INFO *led)
+{
 	int ssize;
-	if (led->indicator_option == NUCLED_USAGE_TYPE_POWER_STATE) {
+	switch (led->indicator_option) {
+	case NUCLED_USAGE_TYPE_POWER_STATE:
 		ssize = sizeof(struct power_state_indicator);
-		led->indicator = vmalloc(ssize);
-		return nuc_led_get_indicator_items(led->led_type,
-						   led->indicator_option, ssize,
-						   led->indicator);
+		break;
+	case NUCLED_USAGE_TYPE_HDD_ACTIVITY:
+		ssize = sizeof(struct hdd_activity_indicator);
+		break;
+	case NUCLED_USAGE_TYPE_ETHERNET:
+		ssize = sizeof(struct ethernet_indicator);
+		break;
+	case NUCLED_USAGE_TYPE_WIFI:
+		ssize = sizeof(struct wifi_indicator);
+		break;
+	case NUCLED_USAGE_TYPE_SOFTWARE:
+		ssize = sizeof(struct software_indicator);
+		break;
+	case NUCLED_USAGE_TYPE_POWER_LIMIT:
+		ssize = sizeof(struct power_limit_indicator);
+		break;
+	default:
+		pr_warn("Unexpected indicator option %d\n",
+			led->indicator_option);
+		return 0;
 	}
-	return 0;
+	led->indicator = vmalloc(ssize);
+	return nuc_led_get_indicator_items(led->led_type, led->indicator_option,
+					   ssize, led->indicator);
 }
 
 /* Get LED */
-static int nuc_led_get_led(u8 led_id, LED_INFO *led) {
+static int nuc_led_get_led(u8 led_id, LED_INFO *led)
+{
 	struct acpi_args args = {
 		.arg1 = NUCLED_WMI_METHODARG_QUERYLEDCOLORTYPE, .arg2 = led_id
 	};
@@ -180,7 +202,8 @@ static int nuc_led_get_led(u8 led_id, LED_INFO *led) {
 }
 
 /* Get LEDs */
-static int nuc_led_get_leds(void) {
+static int nuc_led_get_leds(void)
+{
 	struct acpi_args args = { .arg1 = 0 };
 	struct acpi_buffer input;
 	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
@@ -225,7 +248,8 @@ static int nuc_led_get_leds(void) {
 	return num_leds;
 }
 
-static int nuc_led_set_indicator(u8 led_id, u8 indicator_id) {
+static int nuc_led_set_indicator(u8 led_id, u8 indicator_id)
+{
 	struct acpi_args args = { .arg1 = led_id, .arg2 = indicator_id };
 	struct acpi_buffer input;
 	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
@@ -246,7 +270,8 @@ static int nuc_led_set_indicator(u8 led_id, u8 indicator_id) {
 }
 
 static int nuc_led_set_indicator_option(u8 led_id, u8 indicator_id, u8 item_id,
-					u8 value) {
+					u8 value)
+{
 	struct acpi_args args = { .arg1 = led_id,
 				  .arg2 = indicator_id,
 				  .arg3 = item_id,
@@ -272,7 +297,8 @@ static int nuc_led_set_indicator_option(u8 led_id, u8 indicator_id, u8 item_id,
 }
 
 static ssize_t acpi_proc_write(struct file *filp, const char __user *buff,
-			       size_t len, loff_t *data) {
+			       size_t len, loff_t *data)
+{
 	int i = 0;
 	int ret = 0;
 	char *input, *arg, *sep;
@@ -427,20 +453,36 @@ static ssize_t acpi_proc_write(struct file *filp, const char __user *buff,
 	return len;
 }
 
-static void print_color(LED_RGB *rgb) {
+static void print_color(LED_RGB *rgb)
+{
 	sprintf(get_buffer_end(), "rgb(%d,%d,%d)", rgb->red, rgb->green,
 		rgb->blue);
 }
 
-static void print_blink_led(BLINK_LED *led) {
+static void print_blink_led(BLINK_LED *led)
+{
 	sprintf(get_buffer_end(), "%d%% %s ", led->brightness,
 		led_blink_behaviors[led->blink_behavior]);
 	print_color(&led->color);
 	sprintf(get_buffer_end(), " (%d dHz)", led->blink_freq);
 }
 
-static void print_led(LED_INFO *led) {
+static void print_flash_led(FLASH_LED *led)
+{
+	sprintf(get_buffer_end(), "%d%% ", led->brightness);
+	print_color(&led->color);
+}
+
+static void print_led(LED_INFO *led)
+{
 	int i;
+	struct power_state_indicator *power_state_ind;
+	struct hdd_activity_indicator *hdd_activity_ind;
+	struct ethernet_indicator *ethernet_ind;
+	struct wifi_indicator *wifi_ind;
+	struct software_indicator *software_ind;
+	struct power_limit_indicator *power_limit_ind;
+
 	sprintf(get_buffer_end(), "LED %i (%s) - Color type: %s\n",
 		led->led_type, led->name,
 		led_color_types[bitIndexToIndex(led->led_color_type.flags)]);
@@ -456,25 +498,69 @@ static void print_led(LED_INFO *led) {
 	sprintf(get_buffer_end(), "\n  Current indicator: %s\n",
 		led_usage_types[led->indicator_option]);
 
-	if (led->indicator_option == NUCLED_USAGE_TYPE_POWER_STATE) {
-		struct power_state_indicator *in2 =
+	switch (led->indicator_option) {
+	case NUCLED_USAGE_TYPE_POWER_STATE:
+		power_state_ind =
 			(struct power_state_indicator *)led->indicator;
-		sprintf(get_buffer_end(), "\n        S0 (On): ");
-		print_blink_led(&in2->s0);
-		sprintf(get_buffer_end(), "\n     S3 (Sleep): ");
-		print_blink_led(&in2->s3);
-		sprintf(get_buffer_end(), "\n     Ready mode: ");
-		print_blink_led(&in2->ready_mode);
-		sprintf(get_buffer_end(), "\n  S5 (Soft off): ");
-		print_blink_led(&in2->s5);
-		sprintf(get_buffer_end(), "\n");
-	}
 
-	sprintf(get_buffer_end(), "\n");
+		sprintf(get_buffer_end(), "\n        S0 (On): ");
+		print_blink_led(&power_state_ind->s0);
+		sprintf(get_buffer_end(), "\n     S3 (Sleep): ");
+		print_blink_led(&power_state_ind->s3);
+		sprintf(get_buffer_end(), "\n     Ready mode: ");
+		print_blink_led(&power_state_ind->ready_mode);
+		sprintf(get_buffer_end(), "\n  S5 (Soft off): ");
+		print_blink_led(&power_state_ind->s5);
+		sprintf(get_buffer_end(), "\n");
+		break;
+	case NUCLED_USAGE_TYPE_HDD_ACTIVITY:
+		hdd_activity_ind =
+			(struct hdd_activity_indicator *)led->indicator;
+		sprintf(get_buffer_end(), "\n  HDD LED: ");
+		print_flash_led(&hdd_activity_ind->led);
+		sprintf(get_buffer_end(), " %s\n",
+			led_flash_behaviors[hdd_activity_ind->behavior]);
+		break;
+	case NUCLED_USAGE_TYPE_ETHERNET:
+		ethernet_ind =
+			(struct ethernet_indicator *)led->indicator;
+		sprintf(get_buffer_end(), "\n  Ethernet LED: ");
+		sprintf(get_buffer_end(), "%s  ",
+			led_ethernet_type[ethernet_ind->type]);
+		print_flash_led(&ethernet_ind->led);
+		sprintf(get_buffer_end(), "\n");
+		break;
+	case NUCLED_USAGE_TYPE_WIFI:
+		wifi_ind =
+			(struct wifi_indicator *)led->indicator;
+		sprintf(get_buffer_end(), "\n  Wifi LED: ");
+		print_flash_led(&wifi_ind->led);
+		sprintf(get_buffer_end(), "\n");
+		break;
+	case NUCLED_USAGE_TYPE_SOFTWARE:
+		software_ind =
+			(struct software_indicator *)led->indicator;
+		sprintf(get_buffer_end(), "\n  Software LED: ");
+		print_blink_led(&software_ind->led);
+		sprintf(get_buffer_end(), "\n");
+		break;
+	case NUCLED_USAGE_TYPE_POWER_LIMIT:
+		power_limit_ind =
+			(struct power_limit_indicator *)led->indicator;
+		sprintf(get_buffer_end(), "\n  Power Limit LED: ");
+		sprintf(get_buffer_end(), "%s  ",
+			led_power_limit_indication_scheme[power_limit_ind->indication_scheme]);
+		print_flash_led(&power_limit_ind->led);
+		sprintf(get_buffer_end(), "\n");
+		break;
+	default:
+		break;
+	}
 }
 
 static ssize_t acpi_proc_read(struct file *filp, char __user *buff,
-			      size_t count, loff_t *off) {
+			      size_t count, loff_t *off)
+{
 	ssize_t ret;
 
 	int i, len = 0;
@@ -485,6 +571,9 @@ static ssize_t acpi_proc_read(struct file *filp, char __user *buff,
 
 	for (i = 0; i < num_leds; i++) {
 		print_led(&leds[i]);
+		if (i + 1 < num_leds) {
+			sprintf(get_buffer_end(), "\n\n");
+		}
 	}
 
 	// Return buffer via proc
@@ -501,7 +590,8 @@ static struct file_operations proc_acpi_operations = {
 };
 
 /* Init & unload */
-static int __init init_nuc_led(void) {
+static int __init init_nuc_led(void)
+{
 	struct proc_dir_entry *acpi_entry;
 	kuid_t uid;
 	kgid_t gid;
@@ -537,7 +627,8 @@ static int __init init_nuc_led(void) {
 	return 0;
 }
 
-static void __exit unload_nuc_led(void) {
+static void __exit unload_nuc_led(void)
+{
 	remove_proc_entry("nuc_led", acpi_root_dir);
 	pr_info("Intel NUC LED control driver unloaded\n");
 }

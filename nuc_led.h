@@ -144,11 +144,39 @@ typedef struct {
 	LED_RGB color;
 } BLINK_LED;
 
+typedef struct {
+	u8 brightness;
+	LED_RGB color;
+} FLASH_LED;
+
 struct power_state_indicator {
 	BLINK_LED s0;
 	BLINK_LED s3;
 	BLINK_LED ready_mode;
 	BLINK_LED s5;
+} __packed;
+
+struct hdd_activity_indicator {
+	FLASH_LED led;
+	u8 behavior;
+} __packed;
+
+struct ethernet_indicator {
+	u8 type;
+	FLASH_LED led;
+} __packed;
+
+struct wifi_indicator {
+	FLASH_LED led;
+} __packed;
+
+struct software_indicator {
+	BLINK_LED led;
+} __packed;
+
+struct power_limit_indicator {
+	u8 indication_scheme;
+	FLASH_LED led;
 } __packed;
 
 extern struct proc_dir_entry *acpi_root_dir;
@@ -187,6 +215,9 @@ static const char *const led_names[] = {
 static const char *const led_color_types[] = {"Blue/Amber", "Blue/White", "RGB"};
 static const char *const led_usage_types[] = {"Power state", "HDD Activity", "Ethernet", "Wifi", "Software", "Power Limit", "Disable"};
 static const char *const led_blink_behaviors[] = {"Solid", "Breathing", "Pulsing", "Strobing"};
+static const char *const led_flash_behaviors[] = {"Normally off, ON when active", "Normally on, OFF when active"};
+static const char *const led_ethernet_type[] = {"LAN1", "LAN2", "LAN1 + LAN2"};
+static const char *const led_power_limit_indication_scheme[] = {"Green to Red", "Single Color"};
 
 /* Convert blink/fade value to text */
 static const char *const blink_fade_text[] = {"Off", "1Hz Blink", "0.25Hz Blink", "1Hz Fade", "Always On", "0.5Hz Blink", "0.25Hz Fade", "0.5Hz Fade"};
