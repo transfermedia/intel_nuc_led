@@ -88,7 +88,61 @@ This driver works via '/proc/acpi/nuc_led'.  To get current LED state:
 ```
 cat /proc/acpi/nuc_led
 ```
-    
+
+Sample output:
+```
+LED 0 (Power) - Color type: RGB
+  Supported indicators: Power state  HDD Activity  Ethernet  Wifi  Software  Power Limit  Disable  
+  Current indicator: Power state
+
+        S0 (On): 50% Solid rgb(0,0,255) (10 dHz)
+     S3 (Sleep): 100% Breathing rgb(0,0,255) (10 dHz)
+     Ready mode: 0% Solid rgb(0,0,0) (0 dHz)
+  S5 (Soft off): 0% Solid rgb(0,0,0) (0 dHz)
+
+
+LED 2 (Skull) - Color type: RGB
+  Supported indicators: Power state  HDD Activity  Ethernet  Wifi  Software  Power Limit  Disable  
+  Current indicator: Power state
+
+        S0 (On): 50% Solid rgb(10,0,255) (10 dHz)
+     S3 (Sleep): 100% Breathing rgb(0,0,255) (10 dHz)
+     Ready mode: 0% Solid rgb(0,0,0) (0 dHz)
+  S5 (Soft off): 0% Solid rgb(0,0,0) (0 dHz)
+
+
+LED 3 (Eyes) - Color type: RGB
+  Supported indicators: Power state  HDD Activity  Ethernet  Wifi  Software  Power Limit  Disable  
+  Current indicator: Power state
+
+        S0 (On): 50% Breathing rgb(255,0,0) (3 dHz)
+     S3 (Sleep): 100% Breathing rgb(0,0,255) (10 dHz)
+     Ready mode: 0% Solid rgb(0,0,0) (0 dHz)
+  S5 (Soft off): 0% Solid rgb(0,0,0) (0 dHz)
+
+
+LED 4 (Front 1) - Color type: RGB
+  Supported indicators: Power state  HDD Activity  Ethernet  Wifi  Software  Power Limit  Disable  
+  Current indicator: HDD Activity
+
+  HDD LED: 50% rgb(255,0,0) Normally off, ON when active
+
+
+LED 5 (Front 2) - Color type: RGB
+  Supported indicators: Power state  HDD Activity  Ethernet  Wifi  Software  Power Limit  Disable  
+  Current indicator: Wifi
+
+  Wifi LED: 50% rgb(0,10,250)
+
+
+LED 6 (Front 3) - Color type: RGB
+  Supported indicators: Power state  HDD Activity  Ethernet  Wifi  Software  Power Limit  Disable  
+  Current indicator: Power Limit
+
+  Power Limit LED: Green to Red  50% rgb(0,0,255)
+```
+
+
 To change the LED state:
 
 ```
