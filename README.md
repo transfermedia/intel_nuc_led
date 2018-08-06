@@ -25,15 +25,15 @@ Requirements:
 
 THe `nuc_led` kernel module supports building and installing "from source" directly or using `dkms`.
 
-### Installing Build Dependencies
+### 1. Installing Build Dependencies
 
 Ubuntu:
 
 ```
-apt-get install build-essential linux-headers-$(uname -r)
+sudo apt install build-essential git linux-headers-$(uname -r)
 
 # DKMS dependencies
-apt-get install debhelper dkms
+sudo apt install debhelper dkms
 ```
 
 Redhat:
@@ -48,28 +48,26 @@ yum install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.r
 yum install dkms
 ```
 
-### Building and Installing "from source"
+### 2. Fetching the module
 
 ```
-make clean
-make install
+git clone https://github.com/nomego/intel_nuc_led
+cd intel_nuc_led
 ```
 
-### Building and Installing Using DKMS
-
-Build and install without system packaging:
+### 3a. Building and Installing Using DKMS (recommended)
 
 ```
-make dkms-install
+sudo make dkms-install
 ```
 
-Uninstall without system packaging:
+Uninstall:
 
 ```
-make dkms-uninstall
+sudo make dkms-uninstall
 ```
 
-Build and install using system packaging:
+### 3b. Building and Installing Using DKMS (packaged)
 
 ```
 # Ubuntu
@@ -80,6 +78,31 @@ make dkms-rpm
 
 # Install generated DEB/RPM from the folder specified in the output using system package manager
 ```
+
+### 3c. Building and Installing "from source"
+
+```
+make clean
+make install
+```
+
+### 4. Loading the module
+
+```
+sudo modprobe nuc_led
+```
+
+### 5. Updating the module
+
+```
+cd intel_nuc_led
+sudo rmmod nuc_led
+sudo make dkms-uninstall
+git pull
+sudo make dkms-install
+sudo modprobe nuc_led
+```
+
 
 ## Usage
     
