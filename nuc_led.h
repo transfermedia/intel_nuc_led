@@ -195,6 +195,7 @@ struct acpi_args {
 	u8 arg2;
 	u8 arg3;
 	u8 arg4;
+	u8 arg5; /* required on Phantom Canyon */
 } __packed;
 
 #define BUFFER_SIZE 4096
